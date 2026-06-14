@@ -1,12 +1,10 @@
 """
-File validation pipeline.
+File validation pipeline (FR-ING-02, FR-ING-03, FR-ING-04, FR-ING-05).
 
-Responsibilities:
-  - MIME type detection via python-magic (FR-ING-01/02)
-  - File extension allow-listing
-  - SHA-256 checksum computation (FR-ING-03)
-  - FFprobe-based media integrity check (FR-ING-05)
-  - Metadata extraction: duration, resolution, codec (FR-ING-04)
+  1. Extension allow-list check
+  2. MIME-type detection via python-magic
+  3. SHA-256 checksum
+  4. FFprobe media integrity + metadata extraction
 """
 from __future__ import annotations
 
@@ -20,50 +18,39 @@ from pathlib import Path
 
 import magic
 
-from core.config import get_settings
-from core.logging import get_logger
+from services.ingestion.core.config import get_settings
+from services.ingestion.core.logging import get_logger
 
-logger = get_logger(__name__)
+logger   = get_logger(__name__)
 settings = get_settings()
 
 
 @dataclass
 class ValidationResult:
-    is_valid: bool
-    sha256_hash: str = ""
-    mime_type: str = ""
-    detected_extension: str = ""
-    duration_seconds: float | None = None
-    resolution_width: int | None = None
-    resolution_height: int | None = None
-    codec: str | None = None
-    error_reason: str | None = None
-    raw_ffprobe: dict = field(default_factory=dict)
+    is_valid:           bool
+    sha256_hash:        str          = ""
+    mime_type:          str          = ""
+    detected_extension: str          = ""
+    duration_seconds:   float | None = None
+    resolution_width:   int   | None = None
+    resolution_height:  int   | None = None
+    codec:              str   | None = None
+    error_reason:       str   | None = None
+    raw_ffprobe:        dict         = field(default_factory=dict)
 
 
 class VideoValidator:
-    """Stateless validator – all methods are async-safe."""
-
-    # ── Public entry point ────────────────────────────────────────────────────
+    """Stateless validator — all methods are async-safe."""
 
     async def validate(self, data: bytes, filename: str) -> ValidationResult:
-        """
-        Run the full validation chain:
-          1. Extension check
-          2. MIME-type detection
-          3. SHA-256 hash
-          4. FFprobe media validation + metadata extraction
-        """
         ext = Path(filename).suffix.lower()
 
-        # Step 1 – extension
         if ext not in settings.ALLOWED_EXTENSIONS:
             return ValidationResult(
                 is_valid=False,
                 error_reason=f"Unsupported file extension: {ext!r}",
             )
 
-        # Step 2 – MIME type via libmagic
         mime_type = self._detect_mime(data)
         if mime_type not in settings.ALLOWED_MIME_TYPES:
             return ValidationResult(
@@ -72,12 +59,10 @@ class VideoValidator:
                 error_reason=f"Unsupported MIME type: {mime_type!r}",
             )
 
-        # Step 3 – SHA-256
         sha256 = self._compute_hash(data)
 
-        # Step 4 – FFprobe (writes to a temp file; ffprobe needs a path)
-        probe_result = await self._ffprobe(data, filename)
-        if probe_result is None:
+        probe = await self._ffprobe(data, filename)
+        if probe is None:
             return ValidationResult(
                 is_valid=False,
                 sha256_hash=sha256,
@@ -85,11 +70,11 @@ class VideoValidator:
                 error_reason="FFprobe validation failed: file may be corrupt or truncated",
             )
 
-        streams = probe_result.get("streams", [])
+        streams      = probe.get("streams", [])
         video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+        fmt          = probe.get("format", {})
 
         duration = None
-        fmt = probe_result.get("format", {})
         if "duration" in fmt:
             try:
                 duration = float(fmt["duration"])
@@ -98,9 +83,9 @@ class VideoValidator:
 
         width = height = codec = None
         if video_stream:
-            width = video_stream.get("width")
+            width  = video_stream.get("width")
             height = video_stream.get("height")
-            codec = video_stream.get("codec_name")
+            codec  = video_stream.get("codec_name")
 
         return ValidationResult(
             is_valid=True,
@@ -111,7 +96,7 @@ class VideoValidator:
             resolution_width=width,
             resolution_height=height,
             codec=codec,
-            raw_ffprobe=probe_result,
+            raw_ffprobe=probe,
         )
 
     # ── Internals ─────────────────────────────────────────────────────────────
@@ -127,55 +112,38 @@ class VideoValidator:
     @staticmethod
     def _compute_hash(data: bytes) -> str:
         h = hashlib.sha256()
-        # Process in 64-KB chunks to avoid pausing the event loop on huge buffers
-        chunk_size = 65536
-        for i in range(0, len(data), chunk_size):
-            h.update(data[i : i + chunk_size])
+        for i in range(0, len(data), 65536):
+            h.update(data[i : i + 65536])
         return h.hexdigest()
 
     @staticmethod
     async def _ffprobe(data: bytes, filename: str) -> dict | None:
-        """
-        Write bytes to a temp file, run ffprobe, parse JSON output.
-        Returns the parsed probe dict, or None on failure.
-        """
-        suffix = Path(filename).suffix or ".mp4"
-        tmp_path: str | None = None
+        suffix   = Path(filename).suffix or ".mp4"
+        tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp.write(data)
                 tmp_path = tmp.name
 
-            cmd = [
-                "ffprobe",
-                "-v", "quiet",
-                "-print_format", "json",
-                "-show_format",
-                "-show_streams",
-                tmp_path,
-            ]
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_format", "-show_streams", tmp_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
 
             if proc.returncode != 0:
-                logger.warning(
-                    "ffprobe_error",
-                    filename=filename,
-                    stderr=stderr.decode(errors="replace"),
-                )
+                logger.warning("ffprobe_error", filename=filename,
+                               stderr=stderr.decode(errors="replace"))
                 return None
-
             return json.loads(stdout)
+
         except (asyncio.TimeoutError, FileNotFoundError) as exc:
-            # ffprobe not installed – log and skip; treat file as valid
             logger.warning("ffprobe_unavailable", error=str(exc))
-            return {}
+            return {}   # treat as valid when ffprobe not installed
         except json.JSONDecodeError as exc:
-            logger.warning("ffprobe_json_parse_error", error=str(exc))
+            logger.warning("ffprobe_json_error", error=str(exc))
             return None
         finally:
             if tmp_path and os.path.exists(tmp_path):

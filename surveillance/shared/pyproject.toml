@@ -1,0 +1,38 @@
+# ── shared/pyproject.toml ─────────────────────────────────────────────────────
+#
+# Defines the surveillance-shared internal library.
+# This is what makes `uv pip install -e ./shared` work.
+#
+# When installed, every service can do:
+#   from shared.models import VideoRecord
+#   from shared.events import VideoIngestedEvent
+#
+# The "-e" (editable) install means edits to shared/ are
+# immediately live — no reinstall needed.
+
+[project]
+name            = "surveillance-shared"
+version         = "0.1.0"
+description     = "Shared domain models, events, queue helpers, and storage client"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "aio-pika>=9.4",
+    "minio>=7.2",
+    "structlog>=24.1",
+    "tenacity>=8.3",
+]
+
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+# pyproject.toml lives inside shared/ so "." = the shared/ folder itself.
+# Setuptools will find: shared (root), shared.config, shared.events,
+# shared.models, shared.queue, shared.storage
+where   = ["."]        # go up one level to surveillance/
+include = ["shared*"]   # only pick up shared and shared.*

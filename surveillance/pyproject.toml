@@ -1,0 +1,23 @@
+[tool.uv.workspace]
+members = [
+    "shared",
+    "services/ingestion",
+    # services/preprocessing  <- add when scaffolded
+    # services/detection
+    # services/embedding
+    # services/indexing
+    # services/search
+    # services/api
+    # services/dashboard
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths  = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

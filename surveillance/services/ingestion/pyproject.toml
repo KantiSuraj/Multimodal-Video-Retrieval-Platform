@@ -1,0 +1,51 @@
+# ── services/ingestion/pyproject.toml ─────────────────────────────────────────
+#
+# Defines the surveillance-ingestion service package.
+# This is what makes `uv pip install -e ./services/ingestion` work.
+#
+# Does NOT list surveillance-shared as a dependency here because
+# we install it separately first with `uv pip install -e ./shared`.
+# (uv workspace mode handles this automatically; manual installs need
+# the two-step approach in TESTING_LOCAL.md)
+
+[project]
+name            = "surveillance-ingestion"
+version         = "0.1.0"
+description     = "Video ingestion service — accepts uploads, validates, deduplicates, stores, and emits events"
+requires-python = ">=3.12"
+dependencies = [
+    # Web framework
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    # Async I/O
+    "aiofiles>=23.2",
+    "aiohttp>=3.9",
+    # Video validation
+    "python-magic>=0.4.27",
+    # Filesystem watching
+    "watchdog>=4.0",
+    # Shared infra (same versions as shared/pyproject.toml)
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "aio-pika>=9.4",
+    "minio>=7.2",
+    "structlog>=24.1",
+    "tenacity>=8.3",
+    "alembic>=1.13",
+]
+
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+# Look from surveillance/ root so Python sees "services.ingestion.*"
+where   = ["../.."]
+include = ["services", "services.*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths    = ["tests"]
