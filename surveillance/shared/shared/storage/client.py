@@ -17,7 +17,7 @@ from minio import Minio
 from minio.error import S3Error
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from shared.config.base import BaseServiceSettings
+from shared.shared.config.base import BaseServiceSettings
 
 
 class ObjectStorageClient:
@@ -68,6 +68,13 @@ class ObjectStorageClient:
 
     # ── Read ──────────────────────────────────────────────────────────────────
 
+    @retry(
+        retry=retry_if_exception_type((S3Error, ConnectionError, TimeoutError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
+        
     async def get_object(self, bucket: str, object_name: str) -> bytes:
         """Download and return the full object as bytes."""
         response = await self._run(self._client.get_object, bucket, object_name)

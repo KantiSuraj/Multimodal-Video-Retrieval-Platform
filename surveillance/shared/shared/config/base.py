@@ -43,6 +43,11 @@ class BaseServiceSettings(BaseSettings):
     # ── RabbitMQ / AMQP ───────────────────────────────────────────────────────
     AMQP_URL: str = "amqp://guest:guest@localhost/"
     AMQP_EXCHANGE: str = "video.events"
+    # Consumer tuning
+    AMQP_PREFETCH_COUNT: int = 10
+
+    # Future retry queue support
+    AMQP_MAX_REDELIVERY_ATTEMPTS: int = 5
 
     # ── Redis ─────────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"

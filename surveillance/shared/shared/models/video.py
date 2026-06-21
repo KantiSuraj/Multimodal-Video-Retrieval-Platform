@@ -32,9 +32,11 @@ class Base(DeclarativeBase):
     pass
 
 
+
 class VideoStatus(str, enum.Enum):
     PENDING      = "PENDING"
     PROCESSING   = "PROCESSING"
+    PREPROCESSED = "PREPROCESSED"   # add this line
     INDEXED      = "INDEXED"
     FAILED       = "FAILED"
     QUARANTINED  = "QUARANTINED"
