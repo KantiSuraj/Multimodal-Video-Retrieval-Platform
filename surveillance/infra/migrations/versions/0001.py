@@ -35,7 +35,7 @@ def upgrade() -> None:
         sa.Column(
             "status",
             sa.Enum(
-                "PENDING", "PROCESSING","PREPROCESSED", "INDEXED",
+                "PENDING", "PROCESSING","PREPROCESSED","DETECTED","EMBEDDED", "INDEXED",
                 "FAILED", "QUARANTINED", "DUPLICATE",
                 name="videostatus",
             ),

@@ -5,33 +5,32 @@ version: "3.9"
 # during development with:  uvicorn services.ingestion.main:app --reload
 #
 # To run everything in Docker:
-#   docker compose -f infra/docker/docker-compose.yml up
+#   docker compose -f infra/docker/docker-compose.yml --profile full up
 
 services:
-
   # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER:     postgres
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB:       surveillance
+      POSTGRES_DB: surveillance
     ports:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test:     ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
-      timeout:  5s
-      retries:  10
+      timeout: 5s
+      retries: 10
 
   # ── MinIO ────────────────────────────────────────────────────────────────────
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER:     minioadmin
+      MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
       - "9000:9000"
@@ -39,25 +38,25 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test:     ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "mc", "ready", "local"]
       interval: 5s
-      timeout:  5s
-      retries:  10
+      timeout: 5s
+      retries: 10
 
   # ── RabbitMQ ─────────────────────────────────────────────────────────────────
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     ports:
       - "5672:5672"
-      - "15672:15672"   # Management UI  admin/admin
+      - "15672:15672"   # Management UI  guest/guest
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     healthcheck:
-      test:     rabbitmq-diagnostics -q ping
+      test: rabbitmq-diagnostics -q ping
       interval: 5s
-      timeout:  10s
-      retries:  10
+      timeout: 10s
+      retries: 10
 
   # ── Redis ─────────────────────────────────────────────────────────────────────
   redis:
@@ -65,31 +64,99 @@ services:
     ports:
       - "6379:6379"
     healthcheck:
-      test:     ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
-      retries:  5
+      retries: 5
 
   # ── Ingestion service (optional — run with Docker) ────────────────────────────
   ingestion:
     build:
-      context:    ../../
+      context: ../../
       dockerfile: services/ingestion/Dockerfile
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL:  "postgresql+asyncpg://postgres:postgres@postgres:5432/surveillance"
-      MINIO_ENDPOINT:   "minio:9000"
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/surveillance"
+      MINIO_ENDPOINT: "minio:9000"
       MINIO_ACCESS_KEY: "minioadmin"
       MINIO_SECRET_KEY: "minioadmin"
-      AMQP_URL:         "amqp://guest:guest@rabbitmq/"
-      REDIS_URL:        "redis://redis:6379/0"
-      DEBUG:            "true"
+      AMQP_URL: "amqp://guest:guest@rabbitmq/"
+      REDIS_URL: "redis://redis:6379/0"
+      DEBUG: "true"
     depends_on:
-      postgres:  { condition: service_healthy }
-      minio:     { condition: service_healthy }
-      rabbitmq:  { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
     volumes:
       - watch_dir:/tmp/video_watch
+    profiles:
+      - full   # only started with: docker compose --profile full up
+
+  # ── Preprocessing service (optional — run with Docker) ────────────────────────
+  preprocessing:
+    build:
+      context: ../../
+      dockerfile: services/preprocessing/Dockerfile
+    ports:
+      - "8001:8000"   # container always listens on 8000 (see its Dockerfile CMD);
+                      # mapped to host 8001 to avoid colliding with ingestion's 8000:8000
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/surveillance"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      AMQP_URL: "amqp://guest:guest@rabbitmq/"
+      REDIS_URL: "redis://redis:6379/0"
+      DEBUG: "true"
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    # no watch_dir-style volume — preprocessing has no filesystem-watcher
+    # equivalent; its TMP_DIR scratch space is purely ephemeral container-
+    # local disk, cleaned up by the service itself on every run, so it
+    # doesn't need a named volume the way postgres/minio's actual data does.
+    profiles:
+      - full   # only started with: docker compose --profile full up
+
+  # ── Detection service (optional — run with Docker) ────────────────────────────
+  detection:
+    build:
+      context: ../../
+      dockerfile: services/detection/Dockerfile
+    ports:
+      - "8002:8000"   # container always listens on 8000; mapped to host 8002
+                      # to avoid colliding with ingestion (8000) and preprocessing (8001)
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/surveillance"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      AMQP_URL: "amqp://guest:guest@rabbitmq/"
+      REDIS_URL: "redis://redis:6379/0"
+      DEBUG: "true"
+      # Grounding DINO inference device. Defaults to cpu so this runs out of
+      # the box on a dev machine without NVIDIA Container Toolkit. Set to
+      # "cuda" and uncomment the deploy.resources block below on a
+      # GPU-equipped host — per the platform's GPU-scheduling principle,
+      # this is the one application service in the pipeline that benefits
+      # from being scheduled onto GPU nodes specifically.
+      GROUNDING_DINO_DEVICE: "cpu"
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    # Same reasoning as preprocessing: no named volume needed. Detection's
+    # TMP_DIR scratch space (downloaded frames awaiting inference) is
+    # ephemeral container-local disk, cleaned up unconditionally by the
+    # service itself after every video — never a durable artifact.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     profiles:
       - full   # only started with: docker compose --profile full up
 

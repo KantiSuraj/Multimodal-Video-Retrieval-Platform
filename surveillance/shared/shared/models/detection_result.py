@@ -21,6 +21,7 @@ class DetectionResult(Base):
     __table_args__ = (
         Index("ix_det_video_id",  "video_id"),
         Index("ix_det_frame_ts",  "frame_timestamp_ms"),
+        Index("ix_det_scene_id",  "scene_id"),
     )
 
     id:                  Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -28,11 +29,11 @@ class DetectionResult(Base):
 
     frame_path:          Mapped[str]       = mapped_column(String(1024), nullable=False)
     frame_timestamp_ms:  Mapped[int]       = mapped_column(Integer, nullable=False)
+    scene_id:            Mapped[int]       = mapped_column(Integer, nullable=False, default=0)  # new — additive
 
     label:               Mapped[str]       = mapped_column(String(512), nullable=False)
     confidence:          Mapped[float]     = mapped_column(Float, nullable=False)
 
-    # Bounding box (normalised 0-1)
     bbox_x1:             Mapped[float]     = mapped_column(Float, nullable=False)
     bbox_y1:             Mapped[float]     = mapped_column(Float, nullable=False)
     bbox_x2:             Mapped[float]     = mapped_column(Float, nullable=False)
