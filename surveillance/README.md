@@ -4,7 +4,7 @@ uvicorn services.preprocessing.main:app     --host 0.0.0.0     --port 8001     -
 uvicorn services.ingestion.main:app     --host 0.0.0.0     --port 8000     --reload
 
 
-HF_TOKEN=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
+
 curl localhost:8001/health
 
 export PYTHONPATH=$PWD
