@@ -160,6 +160,39 @@ services:
     profiles:
       - full   # only started with: docker compose --profile full up
 
+    embedding:
+      build:
+        context: ../../
+        dockerfile: services/embedding/Dockerfile
+        ports: 
+          - "8003:8000"
+      environment:
+        DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/surveillance
+        AMQP_URL: amqp://guest:guest@rabbitmq/
+        MINIO_ENDPOINT: minio:9000
+        MINIO_ACCESS_KEY: minioadmin
+        MINIO_SECRET_KEY: minioadmin
+        MINIO_SECURE: "false"
+        CLIP_MODEL_NAME: openai/clip-vit-large-patch14
+        CLIP_DEVICE: "cpu"     
+      depends_on: 
+        postgres: { condition: service_healthy }
+        minio: { condition: service_healthy }
+        rabbitmq: { condition: service_healthy }
+
+      # deploy on cloud 
+      #deploy:
+        # resources:
+        #   reservations:
+        #     devices:
+        #       - driver: nvidia
+        #         count: 1
+        #         capabilities: [gpu] 
+      
+      profiles:
+        - full
+      
+
 volumes:
   pg_data:
   minio_data:

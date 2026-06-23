@@ -1,0 +1,48 @@
+uvicorn services.embedding.main:app     --host 0.0.0.0     --port 8003     --reload
+uvicorn services.detection.main:app     --host 0.0.0.0     --port 8002     --reload
+uvicorn services.preprocessing.main:app     --host 0.0.0.0     --port 8001     --reload
+uvicorn services.ingestion.main:app     --host 0.0.0.0     --port 8000     --reload
+
+
+HF_TOKEN=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
+curl localhost:8001/health
+
+export PYTHONPATH=$PWD
+MINIO_ROOT_USER=minioadmin \
+MINIO_ROOT_PASSWORD=minioadmin \
+minio server ~/minio-data --console-address ":9001"
+sudo systemctl start postgresql
+sudo systemctl start rabbitmq-server
+sudo systemctl start redis-server
+
+verify postgressql
+psql -h localhost -U postgres -d surveillance
+postgres
+SELECT
+    id,
+    status,
+    error_message
+FROM video_records
+ORDER BY created_at DESC
+LIMIT 5;
+\dT+ videostatus
+
+alembic -c infra/migrations/alembic.ini upgrade head
+
+verify detection
+SELECT *
+FROM detection_results
+LIMIT 10;
+
+curl -X POST \
+http://localhost:8000/api/v1/videos \
+-F "file=@/path/to/real_video.mp4"
+
+
+sudo -u postgres psql
+pg_isready -U postgres
+redis-cli ping
+sudo rabbitmqctl status
+
+
+

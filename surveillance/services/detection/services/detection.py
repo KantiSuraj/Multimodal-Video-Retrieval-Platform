@@ -1,13 +1,19 @@
 """Orchestrator. process_frames() is the entry point every message reaches.
 
-Fixed against the real shared.events.detection_complete schema:
-- Detection/DetectionCompleteEvent are now built using the actual flat
-  shape (detections: list[Detection], nested BoundingBox, frame_count,
-  video_id as str) instead of an invented FrameDetections/DetectionMetadata
-  shape that doesn't exist in shared/.
-- scene_id/timestamp_ms/sequence_index — which the real Detection model has
-  no dedicated field for — are carried in Detection.extra so embedding can
-  still deep-link a crop to a video timestamp without an extra DB lookup.
+Builds the actual shared.events.detection_complete schema:
+- DetectionCompleteEvent.frames is a list[FrameDetections] — one entry per
+  source frame, each carrying its own detections: list[Detection]. There is
+  no flat top-level detections list and no frame_count field.
+- Detection has no nested bbox object and no extra dict — bbox_x1..bbox_y2
+  are flat fields directly on Detection, matching what GroundingDINODetector
+  already returns via RawDetection.
+- scene_id/timestamp_ms/sequence_index live on FrameDetections (the frame),
+  not on each Detection — so they're set once per frame instead of being
+  duplicated into a per-detection extra dict.
+- detection_metadata is required on every event; built from Settings, which
+  already carries the GroundingDINO run config (model name, prompt,
+  thresholds) needed to populate it.
+- video_id is a uuid.UUID on the wire, not str — matches VideoRecord.id.
 - DetectionResult rows are cleared for the video_id before re-inserting,
   closing the duplicate-row-on-redelivery gap (MinIO overwrites are
   idempotent; SQL INSERTs are not).
@@ -21,14 +27,15 @@ import uuid
 
 from sqlalchemy import delete
 
-from shared.events.detection_complete import (
-    BoundingBox,
+from shared.shared.events.detection_complete import (
     Detection,
     DetectionCompleteEvent,
+    DetectionMetadata,
+    FrameDetections,
 )
-from shared.events.frame_extracted import FramesExtractedEvent
-from shared.models.detection_result import DetectionResult
-from shared.models.video import VideoRecord, VideoStatus
+from shared.shared.events.frame_extracted import FramesExtractedEvent
+from shared.shared.models.detection_result import DetectionResult
+from shared.shared.models.video import VideoRecord, VideoStatus
 
 from services.detection.core.config import Settings
 from services.detection.core.logging import get_logger
@@ -157,7 +164,6 @@ class DetectionService:
         for raw in raw_detections:
             detection_id = uuid.uuid4()
             crop_path: str | None = None
-            crop_failed = False
 
             try:
                 box_px = (
@@ -175,7 +181,10 @@ class DetectionService:
                     video_id, ref.sequence_index, detection_id, buf.getvalue()
                 )
             except Exception as exc:  # noqa: BLE001
-                crop_failed = True
+                # crop_path stays None — surfaced to operators via this log
+                # line. The wire schema has no field to carry "crop attempted
+                # but failed" downstream, so embedding will simply see no
+                # crop_path and treat it the same as "no crop by design".
                 logger.warning(
                     "detection_crop_persist_failed",
                     video_id=str(video_id),
@@ -202,11 +211,6 @@ class DetectionService:
                     crop_path=crop_path,
                 )
             )
-            # crop_failed is intentionally not persisted as a DB column (no
-            # such column exists) — it's surfaced downstream instead, via
-            # Detection.extra["crop_status"] in _build_event, so embedding
-            # can distinguish "no crop by design" from "crop upload failed".
-            persisted[-1].raw.__dict__.setdefault("_crop_failed", crop_failed)  # type: ignore[attr-defined]
 
         await self._write_detection_rows(rows)
         return persisted
@@ -225,41 +229,53 @@ class DetectionService:
     def _build_event(
         self, video_id: uuid.UUID, frame_results: list[PersistedFrameResult]
     ) -> DetectionCompleteEvent:
-        """Conforms to the real shared.events.detection_complete schema:
-        a flat list of Detection, each with a nested BoundingBox. scene_id/
-        timestamp_ms/sequence_index ride in `extra` since the real schema
-        has no dedicated fields for them.
+        """Builds the real shared.events.detection_complete shape: one
+        FrameDetections per source frame, each carrying its own flat
+        Detection list. crop_bucket is filled in whenever a crop was
+        persisted — the storage layer always writes crops to the same
+        configured bucket, so it doesn't need to be threaded through
+        PersistedDetection.
         """
-        detections_payload: list[Detection] = []
+        frames_payload: list[FrameDetections] = []
         for result in frame_results:
-            for d in result.detections:
-                extra: dict = {
-                    "scene_id": result.frame.scene_id,
-                    "timestamp_ms": result.frame.timestamp_ms,
-                    "sequence_index": result.frame.sequence_index,
-                }
-                if getattr(d.raw, "_crop_failed", False):
-                    extra["crop_status"] = "failed"
-                detections_payload.append(
-                    Detection(
-                        frame_path=result.frame.frame_path,
-                        label=d.raw.label,
-                        confidence=d.raw.confidence,
-                        bbox=BoundingBox(
-                            x1=d.raw.bbox_x1,
-                            y1=d.raw.bbox_y1,
-                            x2=d.raw.bbox_x2,
-                            y2=d.raw.bbox_y2,
-                        ),
-                        crop_path=d.crop_path,
-                        extra=extra,
-                    )
+            detections_payload: list[Detection] = [
+                Detection(
+                    detection_id=d.detection_id,
+                    label=d.raw.label,
+                    confidence=d.raw.confidence,
+                    bbox_x1=d.raw.bbox_x1,
+                    bbox_y1=d.raw.bbox_y1,
+                    bbox_x2=d.raw.bbox_x2,
+                    bbox_y2=d.raw.bbox_y2,
+                    crop_path=d.crop_path,
+                    crop_bucket=(
+                        self._settings.MINIO_DETECTION_CROPS_BUCKET if d.crop_path else None
+                    ),
                 )
+                for d in result.detections
+            ]
+            frames_payload.append(
+                FrameDetections(
+                    frame_path=result.frame.frame_path,
+                    sequence_index=result.frame.sequence_index,
+                    timestamp_ms=result.frame.timestamp_ms,
+                    scene_id=result.frame.scene_id,
+                    detections=detections_payload,
+                )
+            )
+
+        detection_metadata = DetectionMetadata(
+            model_name=self._settings.GROUNDING_DINO_MODEL_NAME,
+            text_prompt=self._settings.GROUNDING_DINO_TEXT_PROMPT,
+            box_threshold=self._settings.GROUNDING_DINO_BOX_THRESHOLD,
+            text_threshold=self._settings.GROUNDING_DINO_TEXT_THRESHOLD,
+            confidence_threshold=self._settings.DETECTION_CONFIDENCE_THRESHOLD,
+        )
 
         return DetectionCompleteEvent(
-            video_id=str(video_id),
-            detections=detections_payload,
-            frame_count=len(frame_results),
+            video_id=video_id,
+            frames=frames_payload,
+            detection_metadata=detection_metadata,
         )
 
     async def _already_processed(self, video_id: uuid.UUID) -> bool:

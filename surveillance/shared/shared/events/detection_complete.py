@@ -9,10 +9,10 @@ second lookup against detection's own tables.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
-
-from shared.events.base import BaseEvent
 
 
 class Detection(BaseModel):
@@ -50,8 +50,9 @@ class DetectionMetadata(BaseModel):
     confidence_threshold: float
 
 
-class DetectionCompleteEvent(BaseEvent):
-    event_type: str = "DetectionCompleteEvent"
+class DetectionCompleteEvent(BaseModel):
+    event_type: Literal["DetectionCompleteEvent"] = "DetectionCompleteEvent"
     video_id: uuid.UUID
     frames: list[FrameDetections] = Field(default_factory=list)
     detection_metadata: DetectionMetadata
+    occurred_at: datetime = Field(default_factory=datetime.utcnow)

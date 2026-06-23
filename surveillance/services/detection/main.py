@@ -16,12 +16,13 @@ from services.detection.services.storage import DetectionStorageService
 from services.detection.workers.consumer_worker import run_consumer_worker
 
 logger = get_logger(__name__)
+settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    configure_logging(settings)
+    configure_logging(debug=settings.DEBUG)
 
     storage_client = ObjectStorageClient(settings)
     await storage_client.ensure_bucket(settings.MINIO_DETECTION_CROPS_BUCKET)
