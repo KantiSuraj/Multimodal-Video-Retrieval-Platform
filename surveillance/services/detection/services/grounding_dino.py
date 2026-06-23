@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-
+import torch
 from PIL import Image
 
 from services.detection.core.config import Settings
@@ -36,7 +36,7 @@ class GroundingDINODetector:
         self._loaded: _LoadedModel | None = None
         # Serialises all inference calls against the one model instance.
         self._inference_lock = asyncio.Semaphore(1)
-
+    
     def load(self) -> None:
         from transformers import (
             AutoModelForZeroShotObjectDetection,
@@ -120,7 +120,7 @@ class GroundingDINODetector:
                 ) from exc
 
     def _run_sync(self, local_image_path: str) -> list[RawDetection]:
-        import torch
+        
 
         assert self._loaded is not None
         processor, model, device = (
@@ -144,7 +144,7 @@ class GroundingDINODetector:
         results = processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
-            box_threshold=self._settings.GROUNDING_DINO_BOX_THRESHOLD,
+            threshold=self._settings.GROUNDING_DINO_BOX_THRESHOLD,
             text_threshold=self._settings.GROUNDING_DINO_TEXT_THRESHOLD,
             target_sizes=[(height, width)],
         )[0]

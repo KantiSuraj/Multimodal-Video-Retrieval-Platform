@@ -45,4 +45,19 @@ redis-cli ping
 sudo rabbitmqctl status
 
 
+SELECT id, sha256_hash, original_filename
+FROM video_records;
 
+DELETE FROM detection_results
+WHERE video_id = '7a98ef02-965e-4058-862d-d5a4dfbcb5a7';
+
+DELETE FROM embedding_records
+WHERE video_id = '7a98ef02-965e-4058-862d-d5a4dfbcb5a7';
+
+DELETE FROM video_records
+WHERE id = '7a98ef02-965e-4058-862d-d5a4dfbcb5a7';
+
+curl -X POST \
+http://localhost:8000/api/v1/videos \
+-F "file=@/home/kanti_suraj/Desktop/VIRAT_S_010204_05_000856_000890.mp4"
+7a98ef02-965e-4058-862d-d5a4dfbcb5a7
