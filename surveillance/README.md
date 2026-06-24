@@ -11,8 +11,9 @@ export PYTHONPATH=$PWD
 MINIO_ROOT_USER=minioadmin \
 MINIO_ROOT_PASSWORD=minioadmin \
 minio server ~/minio-data --console-address ":9001"
-sudo systemctl start postgresql
-sudo systemctl start rabbitmq-server
+sudo systemctl start postgresqlsudo 
+systemctl start rabbitmq-server
+
 sudo systemctl start redis-server
 
 verify postgressql
@@ -60,4 +61,25 @@ WHERE id = '7a98ef02-965e-4058-862d-d5a4dfbcb5a7';
 curl -X POST \
 http://localhost:8000/api/v1/videos \
 -F "file=@/home/kanti_suraj/Desktop/VIRAT_S_010204_05_000856_000890.mp4"
+
 7a98ef02-965e-4058-862d-d5a4dfbcb5a7
+
+
+# Validation only
+python -m pytest services/search/tests/test_search.py::TestSearchServiceValidation -v --tb=short
+
+# Ranking + dedup
+python -m pytest services/search/tests/test_search.py::TestSearchServiceRanking services/search/tests/test_search.py::TestSearchServiceTemporalDeduplication -v --tb=short
+
+# Pagination
+python -m pytest services/search/tests/test_search.py::TestSearchServicePagination -v --tb=short
+
+# Cache + failure modes
+python -m pytest services/search/tests/test_search.py::TestSearchServiceCacheBehaviour services/search/tests/test_search.py::TestSearchServiceFailureModes -v --tb=short
+
+# Infrastructure layer (Qdrant filters, cache keys)
+python -m pytest services/search/tests/test_search.py::TestQdrantSearchClientFilterBuilding services/search/tests/test_search.py::TestCacheKeys -v --tb=short
+
+# Full orchestration
+python -m pytest services/search/tests/test_search.py::TestSearchServiceOrchestration -v --tb=short
+python -m pytest services/search/tests/test_search.py -v --tb=short

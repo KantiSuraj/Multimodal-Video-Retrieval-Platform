@@ -38,6 +38,7 @@ class VideoStatus(str, enum.Enum):
     PROCESSING   = "PROCESSING"
     PREPROCESSED = "PREPROCESSED"   # add this line
     DETECTED     = "DETECTED"
+    EMBEDDED     = "EMBEDDED"
     INDEXED      = "INDEXED"
     FAILED       = "FAILED"
     QUARANTINED  = "QUARANTINED"
