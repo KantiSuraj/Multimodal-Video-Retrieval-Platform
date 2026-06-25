@@ -1,0 +1,49 @@
+[project]
+name            = "surveillance-search"
+version         = "0.1.0"
+description     = "Search Service — HTTP-driven ANN retrieval over indexed Qdrant vectors"
+requires-python = ">=3.12"
+dependencies = [
+    # Shared platform library (installed editable from ./shared/)
+    "surveillance-shared",
+    # Web framework
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    # Multipart file upload (image search endpoint)
+    "python-multipart>=0.0.9",
+    # Qdrant ANN retrieval
+    "qdrant-client>=1.9",
+    # Async PostgreSQL (metadata hydration)
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    # Redis (embedding cache + result cache + history)
+    "redis>=5.0",
+    # CLIP query encoding
+    "torch>=2.2",
+    "transformers>=4.40",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    # Settings + validation
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    # Structured logging
+    "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where   = [".."]
+include = ["services.search*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths    = ["tests"]

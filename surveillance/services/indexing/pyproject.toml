@@ -1,0 +1,42 @@
+[project]
+name            = "surveillance-indexing"
+version         = "0.1.0"
+description     = "Indexing Service — consumes EmbeddingsReadyEvent, upserts vectors into Qdrant"
+requires-python = ">=3.12"
+dependencies = [
+    # Shared platform library (installed editable from ./shared/)
+    "surveillance-shared",
+    # Web framework (health-check endpoint + lifespan)
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    # Qdrant vector database client
+    "qdrant-client>=1.9",
+    # Async PostgreSQL
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    # RabbitMQ consumer
+    "aio-pika>=9.4",
+    # Settings + validation
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    # Structured logging
+    "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where   = [".."]
+include = ["services.indexing*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths    = ["tests"]

@@ -18,10 +18,28 @@ class EmbeddingRecord(BaseModel):
 
 
 class EmbeddingsReadyEvent(BaseModel):
-    """Published to RabbitMQ routing key: video.embeddings_ready"""
+    """Published to RabbitMQ routing key: video.embeddings_ready
 
-    event_type:  str                   = "EmbeddingsReadyEvent"
-    video_id:    str
-    model_name:  str                   # e.g. "openai/clip-vit-large-patch14"
-    embeddings:  list[EmbeddingRecord]
-    occurred_at: datetime              = Field(default_factory=datetime.utcnow)
+    When the embedding service splits a video's embeddings across multiple
+    RabbitMQ messages (to avoid frame-size overflow), each message carries:
+      - batch_index   : 0-based position of this batch
+      - total_batches : total number of batches for this video
+
+    Indexing must NOT transition VideoRecord.status to INDEXED until it
+    processes the batch where batch_index == total_batches - 1  (the last
+    one).  All earlier batches are upserted to Qdrant and then acked
+    without updating the video status.
+
+    For backward-compatibility with single-batch scenarios both fields
+    default to 0 and 1 respectively, which means "this is the only batch".
+    """
+
+    event_type:   str                   = "EmbeddingsReadyEvent"
+    video_id:     str
+    model_name:   str                   # e.g. "openai/clip-vit-large-patch14"
+    embeddings:   list[EmbeddingRecord]
+    occurred_at:  datetime              = Field(default_factory=datetime.utcnow)
+    # Batch co-ordination fields — populated by the embedding service
+    # when it splits a large video across multiple messages.
+    batch_index:   int = 0  # 0-based index of this batch
+    total_batches: int = 1  # total number of batches for this video

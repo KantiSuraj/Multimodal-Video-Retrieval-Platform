@@ -37,6 +37,7 @@ import os
 import shutil
 import uuid
 
+from minio.error import S3Error
 from sqlalchemy import delete
 
 from shared.shared.events.detection_complete import DetectionCompleteEvent
@@ -44,6 +45,7 @@ from shared.shared.events.embeddings_ready import EmbeddingRecord as EmbeddingPa
 from shared.shared.events.embeddings_ready import EmbeddingsReadyEvent
 from shared.shared.models.embedding_record import EmbeddingRecord
 from shared.shared.models.video import VideoRecord, VideoStatus
+from shared.shared.storage.client import _PERMANENT_S3_ERROR_CODES
 
 from services.embedding.core.config import Settings
 from services.embedding.core.logging import get_logger
@@ -89,10 +91,17 @@ class EmbeddingService:
 
         try:
             artifacts = self._collect_artifacts(event)
+            if not artifacts:
+                logger.warning(
+                    "embedding_no_artifacts_skipped",
+                    video_id=str(video_id),
+                )
+                await self._mark_status(video_id, VideoStatus.FAILED,
+                                        error_message="DetectionCompleteEvent carried no embeddable artifacts")
+                return
             persisted = await self._embed_artifacts(video_id, artifacts)
             await self._write_embedding_rows(video_id, persisted)
-            stored_event = self._build_event(video_id, persisted)
-            await self._publisher.publish_embeddings_ready(stored_event)
+            await self._publish_in_batches(video_id, persisted)
             await self._mark_status(video_id, VideoStatus.EMBEDDED)
         except EmbeddingError as exc:
             if exc.recoverable:
@@ -104,6 +113,27 @@ class EmbeddingService:
                 )
                 raise
             await self._mark_status(video_id, VideoStatus.FAILED, error_message=exc.message)
+        except Exception as exc:  # noqa: BLE001
+            # Non-EmbeddingError exceptions (e.g. AMQP publish failure, DB
+            # error on _mark_status) must NOT leave the video stuck at
+            # PROCESSING forever.  Wrap and mark FAILED so operators can
+            # identify and replay the video.
+            logger.error(
+                "embedding_unexpected_failure",
+                video_id=str(video_id),
+                reason=str(exc),
+                exc_info=True,
+            )
+            await self._mark_status(
+                video_id,
+                VideoStatus.FAILED,
+                error_message=f"Unexpected error: {exc}",
+            )
+            raise EmbeddingError(
+                message=str(exc),
+                stage=EmbeddingStage.PUBLISH,
+                recoverable=True,   # retry — transient publish failures are recoverable
+            ) from exc
         finally:
             self._cleanup_tmp_files(video_id)
 
@@ -150,7 +180,29 @@ class EmbeddingService:
     ) -> str:
         try:
             data = await self._storage.fetch_artifact(artifact.source_bucket, artifact.source_path)
+        except S3Error as exc:
+            # Distinguish permanent S3 errors (e.g. NoSuchKey — the object was
+            # never written by preprocessing/detection) from transient ones.
+            # Permanent errors must NOT be requeued: the key will never appear
+            # on its own, so marking recoverable=True would cause an infinite
+            # nack-redeliver loop.  Route to DLQ instead (recoverable=False).
+            is_permanent = exc.code in _PERMANENT_S3_ERROR_CODES
+            if is_permanent:
+                logger.error(
+                    "embedding_artifact_missing",
+                    video_id=str(video_id),
+                    bucket=artifact.source_bucket,
+                    path=artifact.source_path,
+                    s3_code=exc.code,
+                )
+            raise EmbeddingError(
+                message=f"Failed to fetch artifact {artifact.source_path}: {exc}",
+                stage=EmbeddingStage.FETCH_ARTIFACT,
+                recoverable=not is_permanent,  # permanent S3 error → DLQ, not requeue
+            ) from exc
         except Exception as exc:  # noqa: BLE001
+            # Non-S3 exceptions (network timeout, connection refused) are
+            # transient and safe to retry via requeue.
             raise EmbeddingError(
                 message=f"Failed to fetch artifact {artifact.source_path}: {exc}",
                 stage=EmbeddingStage.FETCH_ARTIFACT,
@@ -190,7 +242,11 @@ class EmbeddingService:
             await db.execute(delete(EmbeddingRecord).where(EmbeddingRecord.video_id == video_id))
 
     def _build_event(
-        self, video_id: uuid.UUID, persisted: list[PersistedEmbedding]
+        self,
+        video_id: uuid.UUID,
+        persisted: list[PersistedEmbedding],
+        batch_index: int,
+        total_batches: int,
     ) -> EmbeddingsReadyEvent:
         embeddings_payload = [
             EmbeddingPayload(
@@ -206,7 +262,63 @@ class EmbeddingService:
             video_id=str(video_id),
             model_name=self._settings.CLIP_MODEL_NAME,
             embeddings=embeddings_payload,
+            batch_index=batch_index,
+            total_batches=total_batches,
         )
+
+    async def _publish_in_batches(
+        self, video_id: uuid.UUID, persisted: list[PersistedEmbedding]
+    ) -> None:
+        """Publish EmbeddingsReadyEvent in chunks to avoid AMQP frame-size overflow.
+
+        Problem: serialising 333 embeddings × 512 floats as JSON produces
+        ~4–8 MB which exceeds the aio_pika default frame size (128 KB).
+        Solution: split into batches of EMBEDDING_PUBLISH_BATCH_SIZE and
+        publish one RabbitMQ message per batch.  Indexing consumes each
+        batch independently — idempotency is preserved via deterministic
+        Qdrant point IDs derived from (video_id, source_path).
+
+        Any AMQP exception is wrapped as a recoverable EmbeddingError so
+        the caller's except clause catches it and marks VideoStatus.FAILED
+        instead of leaving the video stuck at PROCESSING.
+        """
+        batch_size = self._settings.EMBEDDING_PUBLISH_BATCH_SIZE
+        batches = [
+            persisted[i : i + batch_size]
+            for i in range(0, len(persisted), batch_size)
+        ]
+        logger.info(
+            "embedding_publish_batches",
+            video_id=str(video_id),
+            total=len(persisted),
+            batches=len(batches),
+            batch_size=batch_size,
+        )
+        for batch_idx, batch in enumerate(batches):
+            try:
+                event = self._build_event(
+                    video_id,
+                    batch,
+                    batch_index=batch_idx,
+                    total_batches=len(batches),
+                )
+                await self._publisher.publish_embeddings_ready(event)
+                logger.debug(
+                    "embedding_batch_published",
+                    video_id=str(video_id),
+                    batch=batch_idx + 1,
+                    of=len(batches),
+                    count=len(batch),
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise EmbeddingError(
+                    message=(
+                        f"Failed to publish embedding batch {batch_idx + 1}/{len(batches)}"
+                        f" for video {video_id}: {exc}"
+                    ),
+                    stage=EmbeddingStage.PUBLISH,
+                    recoverable=True,
+                ) from exc
 
     async def _already_processed(self, video_id: uuid.UUID) -> bool:
         async with get_session() as db:

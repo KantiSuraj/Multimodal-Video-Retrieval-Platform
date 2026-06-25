@@ -6,6 +6,13 @@ The ingestion service writes raw video; preprocessing reads it and writes
 clips/frames; the search service reads frames for preview URLs.
 
 Retries are handled here via tenacity so callers never worry about them.
+
+Note on S3Error retry policy:
+  - Permanent errors (NoSuchKey, NoSuchBucket, AccessDenied) must NOT be
+    retried — they will never succeed and cause infinite requeue loops when
+    wrapped in recoverable EmbeddingError/DetectionError. We retry only
+    transient S3 errors by filtering on error code.
+  - Connection/timeout errors are always transient and safe to retry.
 """
 from __future__ import annotations
 
@@ -15,9 +22,32 @@ from uuid import UUID
 
 from minio import Minio
 from minio.error import S3Error
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from shared.shared.config.base import BaseServiceSettings
+
+# S3 error codes that represent permanent, unrecoverable conditions.
+# These must NOT be retried — retrying will never succeed and only wastes time.
+_PERMANENT_S3_ERROR_CODES = frozenset({
+    "NoSuchKey",
+    "NoSuchBucket",
+    "AccessDenied",
+    "InvalidBucketName",
+    "InvalidObjectName",
+})
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """Return True only for errors that are worth retrying.
+
+    S3Errors with a permanent error code (e.g. NoSuchKey) are not transient
+    and must propagate immediately so callers can distinguish them from
+    infrastructure glitches.
+    """
+    if isinstance(exc, S3Error):
+        return exc.code not in _PERMANENT_S3_ERROR_CODES
+    return isinstance(exc, (ConnectionError, TimeoutError))
+
 
 
 class ObjectStorageClient:
@@ -43,7 +73,7 @@ class ObjectStorageClient:
     # ── Write ─────────────────────────────────────────────────────────────────
 
     @retry(
-        retry=retry_if_exception_type((S3Error, ConnectionError, TimeoutError)),
+        retry=retry_if_exception(_is_transient_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
@@ -69,12 +99,12 @@ class ObjectStorageClient:
     # ── Read ──────────────────────────────────────────────────────────────────
 
     @retry(
-        retry=retry_if_exception_type((S3Error, ConnectionError, TimeoutError)),
+        retry=retry_if_exception(_is_transient_error),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
-        
+    
     async def get_object(self, bucket: str, object_name: str) -> bytes:
         """Download and return the full object as bytes."""
         response = await self._run(self._client.get_object, bucket, object_name)

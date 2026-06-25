@@ -68,12 +68,31 @@ class IndexingService:
 
     async def process_embeddings(self, event: EmbeddingsReadyEvent) -> None:
         video_id = event.video_id
+        is_final_batch = (event.batch_index == event.total_batches - 1)
+        is_first_batch = (event.batch_index == 0)
 
-        if await self._already_indexed(video_id):
+        # Only apply the idempotency guard on the FIRST batch (batch_index=0).
+        # Intermediate and final batches must always be upserted regardless of
+        # video status — the video is already PROCESSING when they arrive.
+        # Applying the guard on every batch would skip batches 1..N-1 because
+        # as soon as batch 0 is processed the video is still PROCESSING (or
+        # INDEXED if a prior full run completed), causing partial indexing.
+        if is_first_batch and await self._already_indexed(video_id):
             logger.info("indexing_already_indexed_skipped", video_id=video_id)
             return
 
-        await self._mark_status(video_id, VideoStatus.PROCESSING)
+        # Only transition to PROCESSING on the first batch to avoid
+        # redundant DB writes on every intermediate batch.
+        if is_first_batch:
+            await self._mark_status(video_id, VideoStatus.PROCESSING)
+
+        logger.info(
+            "indexing_batch_progress",
+            video_id=video_id,
+            batch_index=event.batch_index,
+            total_batches=event.total_batches,
+            embeddings_in_batch=len(event.embeddings),
+        )
 
         try:
             self._validate_embeddings(event)
@@ -81,12 +100,26 @@ class IndexingService:
             await self._qdrant.ensure_collection()
             await self._qdrant.batch_upsert(points)
             await self._update_embedding_records(event, points)
-            await self._mark_status(video_id, VideoStatus.INDEXED)
-            logger.info(
-                "indexing_complete",
-                video_id=video_id,
-                points_indexed=len(points),
-            )
+
+            # Only mark INDEXED after the final batch has been persisted.
+            # Marking it earlier causes all subsequent batches to hit
+            # _already_indexed() and be silently dropped.
+            if is_final_batch:
+                await self._mark_status(video_id, VideoStatus.INDEXED)
+                logger.info(
+                    "indexing_complete",
+                    video_id=video_id,
+                    points_indexed=len(points),
+                    total_batches=event.total_batches,
+                )
+            else:
+                logger.debug(
+                    "indexing_batch_upserted",
+                    video_id=video_id,
+                    batch_index=event.batch_index,
+                    total_batches=event.total_batches,
+                    points_upserted=len(points),
+                )
         except IndexingError as exc:
             if exc.recoverable:
                 logger.warning(

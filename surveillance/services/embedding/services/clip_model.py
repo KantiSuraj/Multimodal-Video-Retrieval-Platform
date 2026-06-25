@@ -100,14 +100,45 @@ class CLIPEmbedder:
 
         image = Image.open(local_image_path).convert("RGB")
 
-        inputs = processor(images=image, return_tensors="pt").to(device)
+        inputs = processor(images=image, return_tensors="pt")
+        pixel_values = inputs["pixel_values"].to(device)
 
         with torch.no_grad():
-            features = model.get_image_features(**inputs)
+            # Do NOT use model.get_image_features() — in this transformers
+            # version it returns last_hidden_state (1, seq_len, hidden_dim)
+            # instead of the projected pooled output (1, projection_dim).
+            #
+            # Spell out the three steps that get_image_features() is
+            # supposed to perform internally:
+            #
+            #   1. vision_model → BaseModelOutputWithPooling
+            #      .last_hidden_state : (1, seq_len, hidden_dim)  ← NOT this
+            #      .pooler_output     : (1, hidden_dim)            ← this
+            #
+            #   2. visual_projection(pooler_output)
+            #      → (1, projection_dim)  e.g. 512 for base/32
+            #
+            #   3. [0] collapses the batch dimension → (projection_dim,)
+            #
+            vision_outputs = model.vision_model(pixel_values=pixel_values)
+            pooled = vision_outputs.pooler_output          # (1, hidden_dim)
+            projected = model.visual_projection(pooled)    # (1, projection_dim)
 
-        vector = features[0].cpu().numpy().astype(np.float64)
+        vector = projected[0].cpu().numpy().astype(np.float64)
+
+        if vector.ndim != 1:
+            raise EmbeddingError(
+                message=(
+                    f"Expected 1-D vector after visual_projection()[0], "
+                    f"got shape {vector.shape}."
+                ),
+                stage=EmbeddingStage.MODEL_INFERENCE,
+                recoverable=False,
+            )
+
         vector = self._normalize(vector)
         return vector.tolist()
+
 
     @staticmethod
     def _normalize(vector: np.ndarray) -> np.ndarray:

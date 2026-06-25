@@ -24,6 +24,12 @@ class Settings(BaseServiceSettings):
     # concurrently.
     EMBEDDING_CONSUMER_PREFETCH: int = 2
 
+    # Max embeddings per RabbitMQ message.  Each embedding carries a 512-float
+    # vector (~3 KB JSON); 50 per message ≈ 150 KB, well under the aio_pika
+    # default frame limit.  Reduce if you switch to a larger CLIP model
+    # (e.g. clip-vit-large-patch14 → 768-dim → ~4.5 KB/embedding).
+    EMBEDDING_PUBLISH_BATCH_SIZE: int = 50
+
     EMBEDDING_TMP_DIR: str = "/tmp/embedding"
 
 

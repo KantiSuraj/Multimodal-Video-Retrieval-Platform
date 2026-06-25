@@ -68,6 +68,22 @@ services:
       interval: 5s
       retries: 5
 
+  # ── Qdrant vector database ────────────────────────────────────────────────────
+  # Required by Indexing (writes vectors) and Search (reads vectors).
+  # Exposed on the standard gRPC (6334) and HTTP (6333) ports.
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"   # HTTP REST API
+      - "6334:6334"   # gRPC API (preferred by qdrant-client with prefer_grpc=True)
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # ── Ingestion service (optional — run with Docker) ────────────────────────────
   ingestion:
     build:
@@ -160,40 +176,112 @@ services:
     profiles:
       - full   # only started with: docker compose --profile full up
 
-    embedding:
-      build:
-        context: ../../
-        dockerfile: services/embedding/Dockerfile
-        ports: 
-          - "8003:8000"
-      environment:
-        DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/surveillance
-        AMQP_URL: amqp://guest:guest@rabbitmq/
-        MINIO_ENDPOINT: minio:9000
-        MINIO_ACCESS_KEY: minioadmin
-        MINIO_SECRET_KEY: minioadmin
-        MINIO_SECURE: "false"
-        CLIP_MODEL_NAME: openai/clip-vit-large-patch14
-        CLIP_DEVICE: "cpu"     
-      depends_on: 
-        postgres: { condition: service_healthy }
-        minio: { condition: service_healthy }
-        rabbitmq: { condition: service_healthy }
+  # ── Embedding service (optional — run with Docker) ────────────────────────────
+  embedding:
+    build:
+      context: ../../
+      dockerfile: services/embedding/Dockerfile
+    ports:
+      - "8003:8000"   # mapped to host 8003 to avoid port collisions
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/surveillance"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      MINIO_SECURE: "false"
+      AMQP_URL: "amqp://guest:guest@rabbitmq/"
+      REDIS_URL: "redis://redis:6379/0"
+      CLIP_MODEL_NAME: "openai/clip-vit-base-patch32"
+      CLIP_DEVICE: "cpu"
+      DEBUG: "true"
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    # HuggingFace model cache: avoids re-downloading CLIP weights on every
+    # container restart. Mount a named volume so the weights survive rebuilds.
+    volumes:
+      - hf_cache_embedding:/app/.cache/huggingface
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    profiles:
+      - full
 
-      # deploy on cloud 
-      #deploy:
-        # resources:
-        #   reservations:
-        #     devices:
-        #       - driver: nvidia
-        #         count: 1
-        #         capabilities: [gpu] 
-      
-      profiles:
-        - full
-      
+  # ── Indexing service (optional — run with Docker) ─────────────────────────────
+  # Consumes EmbeddingsReadyEvent → upserts vectors into Qdrant →
+  # updates EmbeddingRecord rows in PostgreSQL.
+  # No GPU dependency: all work is Qdrant I/O + PostgreSQL writes.
+  indexing:
+    build:
+      context: ../../
+      dockerfile: services/indexing/Dockerfile
+    ports:
+      - "8004:8000"   # health check only; primary work is RabbitMQ consumption
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/surveillance"
+      AMQP_URL: "amqp://guest:guest@rabbitmq/"
+      REDIS_URL: "redis://redis:6379/0"
+      QDRANT_HOST: "qdrant"
+      QDRANT_PORT: "6333"
+      QDRANT_GRPC_PORT: "6334"
+      QDRANT_USE_GRPC: "true"
+      QDRANT_COLLECTION_NAME: "surveillance_embeddings"
+      QDRANT_VECTOR_DIMENSION: "512"   # must match CLIP model output dimension
+      DEBUG: "true"
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
+    profiles:
+      - full
+
+  # ── Search service (optional — run with Docker) ───────────────────────────────
+  # HTTP-driven retrieval layer. No RabbitMQ consumer — request-driven only.
+  # Encodes queries with CLIP → ANN retrieval in Qdrant → hydrates from PG →
+  # caches results in Redis.
+  search:
+    build:
+      context: ../../
+      dockerfile: services/search/Dockerfile
+    ports:
+      - "8005:8000"   # search API on host port 8005
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/surveillance"
+      REDIS_URL: "redis://redis:6379/0"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      MINIO_SECURE: "false"
+      QDRANT_HOST: "qdrant"
+      QDRANT_PORT: "6333"
+      QDRANT_GRPC_PORT: "6334"
+      QDRANT_USE_GRPC: "true"
+      QDRANT_COLLECTION_NAME: "surveillance_embeddings"
+      QDRANT_VECTOR_DIMENSION: "512"   # must match the indexing service setting
+      CLIP_MODEL_NAME: "openai/clip-vit-base-patch32"
+      CLIP_DEVICE: "cpu"
+      SEARCH_HNSW_EF: "128"
+      DEBUG: "true"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    volumes:
+      - hf_cache_search:/app/.cache/huggingface
+    profiles:
+      - full
+
 
 volumes:
   pg_data:
   minio_data:
+  qdrant_data:
   watch_dir:
+  hf_cache_embedding:   # CLIP weights for the embedding service
+  hf_cache_search:      # CLIP weights for the search service
